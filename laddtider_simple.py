@@ -27,9 +27,6 @@ class Config:
     
     # Price margin required for profitable discharge (includes battery efficiency losses)
     MARGIN_REQUIRED = 25  # öre/kWh (0.25 SEK/kWh)
-    
-    # Number of hours to charge
-    CHARGE_HOURS = 3
 
 def get_price_data() -> List[dict]:
     """Fetch price data from API for tomorrow."""
@@ -117,30 +114,6 @@ def find_charge_discharge_hours(prices: List[dict]) -> Tuple[List[datetime], Lis
         )
     
     return (all_charge_hours, sorted(discharge_candidates))
-
-def format_output(times: List[datetime], action: str) -> None:
-    """Format and print charging/discharging schedule."""
-    if not times:
-        return
-    
-    # Group consecutive hours
-    groups = []
-    current_group = [times[0]]
-    
-    for t in times[1:]:
-        if t - current_group[-1] == timedelta(hours=1):
-            current_group.append(t)
-        else:
-            groups.append(current_group)
-            current_group = [t]
-    groups.append(current_group)
-    
-    # Print each group with today's date
-    today = datetime.now().date()
-    for group in groups:
-        start = group[0]
-        end = group[-1] + timedelta(hours=1)
-        print(f"{today.strftime('%Y-%m-%d')} {start.strftime('%H:%M')}-{end.strftime('%H:%M')}/1234567/{action}")
 
 def main() -> None:
     """Main function."""

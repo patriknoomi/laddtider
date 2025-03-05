@@ -7,29 +7,28 @@ import logging
 from typing import List, Tuple
 import requests
 import sys
+import config
 
 # Configure logging
 logging.basicConfig(
-    level=logging.ERROR,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO,
+    format='%(message)s',  # Simplified format, we'll add timestamps manually
+    handlers=[
+        logging.FileHandler(config.LOG_TO)
+    ]
 )
 logger = logging.getLogger(__name__)
 
 # Configuration
 class Config:
-    # Base URL for the API
-    API_BASE_URL = "https://www.elprisetjustnu.se/api/v1/prices"
-    PRICE_ZONE = "SE3"  # Stockholm price zone
+    # Use all settings from config file
+    API_BASE_URL = config.API_BASE_URL
+    PRICE_ZONE = config.PRICE_ZONE
+    TIBBER_ADDON = config.TIBBER_ADDON
+    VAT = config.VAT
     
-    # Price components (öre/kWh)
-    TIBBER_PÅSLAG = 8.6  # Tibber's fee including VAT
-    MOMS = 1.25  # 25% VAT
-    
-    # Price margin required for profitable discharge (includes battery efficiency losses)
-    MARGIN_REQUIRED = 25  # öre/kWh (0.25 SEK/kWh)
-    
-    # Number of hours to charge
-    CHARGE_HOURS = 3
+    # Calculate required margin based on grid cost and efficiency
+    MARGIN_REQUIRED = config.GRID_COST * (1 - config.SYSTEM_EFFICIENCY)
 
 def get_price_data() -> List[dict]:
     """Fetch price data from API for tomorrow."""
@@ -47,8 +46,8 @@ def get_price_data() -> List[dict]:
 def calculate_total_price(spot_price: float) -> float:
     """Calculate total price including Tibber fee and VAT."""
     spot_ore = spot_price * 100
-    price_before_vat = spot_ore + Config.TIBBER_PÅSLAG/Config.MOMS
-    return price_before_vat * Config.MOMS
+    price_before_vat = spot_ore + Config.TIBBER_ADDON/Config.VAT
+    return price_before_vat * Config.VAT
 
 def find_charge_discharge_hours(prices: List[dict]) -> Tuple[List[datetime], List[datetime]]:
     """Find optimal hours for charging and discharging."""
@@ -57,6 +56,7 @@ def find_charge_discharge_hours(prices: List[dict]) -> Tuple[List[datetime], Lis
         time_start = datetime.fromisoformat(hour["time_start"].replace('Z', '+00:00')).astimezone()
         total_price = calculate_total_price(hour["SEK_per_kWh"])
         price_times.append((time_start, total_price))
+        logger.debug(f"Price for {time_start.strftime('%H:%M')}: {total_price:.1f} öre/kWh")
     
     if not price_times:
         logger.error("No price data available")
@@ -65,122 +65,145 @@ def find_charge_discharge_hours(prices: List[dict]) -> Tuple[List[datetime], Lis
     # Sort chronologically
     price_times.sort(key=lambda x: x[0])
     
-    # Find all possible charging blocks
-    charging_options = []
-    for i in range(len(price_times) - 2):  # Look at 3-hour windows
-        times = []
-        prices = []
-        
-        # Try to get 3 consecutive hours
-        valid_block = True
-        for j in range(3):
-            if i + j >= len(price_times):
-                valid_block = False
-                break
-            if j > 0 and price_times[i+j][0].day != price_times[i+j-1][0].day:
-                valid_block = False
-                break
-            times.append(price_times[i+j][0])
-            prices.append(price_times[i+j][1])
-        
-        if valid_block:
-            avg_price = sum(prices) / len(prices)
-            charging_options.append((times, avg_price, prices))
-        
-        # Only add shorter blocks if they're significantly cheaper
-        elif len(times) >= 2:
-            avg_price = sum(prices) / len(times)
-            if avg_price < min(prices) * 0.9:  # At least 10% cheaper than any individual hour
-                charging_options.append((times, avg_price, prices))
+    # Find all potential charging blocks (up to 3 consecutive hours each)
+    charging_blocks = []
     
-    # Sort charging options by price
-    charging_options.sort(key=lambda x: x[1])
+    # Look at each hour as a potential start of a charging block
+    for i in range(len(price_times)):
+        # Try to build a block of up to 3 consecutive hours
+        block_times = []
+        block_prices = []
+        
+        # Add up to 3 consecutive hours to this block
+        for j in range(3):  # Try to make each block 3 hours if possible
+            if i + j >= len(price_times):
+                break
+                
+            # Stop if we cross midnight
+            if j > 0 and price_times[i+j][0].day != price_times[i][0].day:
+                break
+                
+            # Stop if hours aren't consecutive
+            if j > 0 and price_times[i+j][0] - block_times[-1] != timedelta(hours=1):
+                break
+                
+            block_times.append(price_times[i+j][0])
+            block_prices.append(price_times[i+j][1])
+        
+        if block_times:  # If we found at least one hour
+            avg_price = sum(block_prices) / len(block_prices)
+            
+            # Find discharge opportunities after this block
+            discharge_options = [
+                (t, p) for t, p in price_times[i+len(block_times):]
+                if p >= avg_price + Config.MARGIN_REQUIRED
+            ]
+            
+            if discharge_options:
+                charging_blocks.append({
+                    'times': block_times,
+                    'avg_price': avg_price,
+                    'discharge_options': discharge_options
+                })
+    
+    # Sort blocks by average price and start time
+    charging_blocks.sort(key=lambda x: (x['avg_price'], x['times'][0].hour))
     
     all_charge_hours = []
     all_discharge_hours = []
+    used_hours = set()
     
-    # Try each charging block, starting with the cheapest
-    for charge_times, charge_avg_price, charge_prices in charging_options:
-        charge_end = charge_times[-1]
-        
-        # Find potential discharge hours after this charging block
-        discharge_candidates = [
-            (t, p) for t, p in price_times 
-            if t > charge_end and p >= charge_avg_price + Config.MARGIN_REQUIRED
-        ]
-        
-        if not discharge_candidates:
+    # Add logging for block selection - sort by time for logging
+    sorted_for_log = sorted(charging_blocks, key=lambda x: x['times'][0])
+    logger.info("Found charging blocks (chronological order):")
+    for block in sorted_for_log:
+        times = [t.strftime('%H:%M') for t in block['times']]
+        logger.info(
+            f"  {'-'.join(times)}, "
+            f"avg price: {block['avg_price']:.1f} öre/kWh, "
+            f"discharge options: {len(block['discharge_options'])} hours"
+        )
+    logger.info("")
+
+    # Keep track of decisions for logging
+    decisions = []
+    
+    # Keep trying blocks until we've processed all profitable opportunities
+    for block in charging_blocks:
+        # Skip if any hours are already used
+        if any(t in used_hours for t in block['times']):
+            logger.debug(f"Skipping block {block['times'][0].strftime('%H:%M')}, hours already used")
             continue
         
-        # Find consecutive profitable discharge periods
-        best_discharge = None
-        max_profit = 0
+        # Add charging hours (each block can be up to 3 hours)
+        all_charge_hours.extend(block['times'])
+        used_hours.update(block['times'])
         
-        i = 0
-        while i < len(discharge_candidates):
-            current_seq = [discharge_candidates[i][0]]
-            current_profit = discharge_candidates[i][1]
+        # Add discharge hours
+        discharge_times = [t for t, _ in block['discharge_options'] if t not in used_hours]
+        all_discharge_hours.extend(discharge_times)
+        used_hours.update(discharge_times)
+        
+        # Store decision for later logging
+        decision = {
+            'charge_times': block['times'],
+            'charge_price': block['avg_price'],
+            'discharge_times': discharge_times
+        }
+        decisions.append(decision)
+    
+    # Log decisions in chronological order
+    logger.info("Selected charge/discharge pairs (chronological order):")
+    for decision in sorted(decisions, key=lambda x: x['charge_times'][0]):
+        times = [t.strftime('%H:%M') for t in decision['charge_times']]
+        logger.info(
+            f"Charging: {'-'.join(times)}, "
+            f"avg price: {decision['charge_price']:.1f} öre/kWh"
+        )
+        
+        if decision['discharge_times']:
+            # Group consecutive discharge hours
+            discharge_groups = []
+            current_group = [decision['discharge_times'][0]]
             
-            j = i + 1
-            while j < len(discharge_candidates):
-                if discharge_candidates[j][0] - current_seq[-1] == timedelta(hours=1):
-                    current_seq.append(discharge_candidates[j][0])
-                    current_profit += discharge_candidates[j][1]
-                    if len(current_seq) <= len(charge_times) * 3:  # Each charge hour can support up to 3 discharge hours
-                        if current_profit > max_profit:
-                            max_profit = current_profit
-                            best_discharge = current_seq.copy()
+            for t in decision['discharge_times'][1:]:
+                if t - current_group[-1] == timedelta(hours=1):
+                    current_group.append(t)
                 else:
-                    break
-                j += 1
-            i = j
-        
-        # Skip if charging period is too short for discharge period
-        if best_discharge and len(charge_times) * 3 < len(best_discharge):
-            continue
-        
-        if best_discharge:
-            # Check if this cycle overlaps with existing cycles
-            overlaps = False
-            for t in charge_times + best_discharge:
-                if t in all_charge_hours or t in all_discharge_hours:
-                    overlaps = True
-                    break
+                    discharge_groups.append(current_group)
+                    current_group = [t]
+            discharge_groups.append(current_group)
             
-            if not overlaps:
-                all_charge_hours.extend(charge_times)
-                all_discharge_hours.extend(best_discharge)
-                continue
+            # Log each discharge group
+            for group in discharge_groups:
+                start = group[0]
+                end = group[-1] + timedelta(hours=1)
+                # Calculate average price for this discharge period
+                discharge_prices = [p for t, p in price_times if t in group]
+                avg_discharge_price = sum(discharge_prices) / len(discharge_prices)
+                logger.info(
+                    f"Discharging: {start.strftime('%H:%M')}-{end.strftime('%H:%M')}, "
+                    f"avg price: {avg_discharge_price:.1f} öre/kWh"
+                )
+        logger.info("")
+    
+    # Remove any discharge hours that would overlap with charging
+    all_discharge_hours = [
+        t for t in sorted(all_discharge_hours)
+        if t not in all_charge_hours
+    ]
     
     return (sorted(all_charge_hours), sorted(all_discharge_hours))
-
-def format_output(times: List[datetime], action: str) -> None:
-    """Format and print charging/discharging schedule."""
-    if not times:
-        return
-    
-    # Group consecutive hours
-    groups = []
-    current_group = [times[0]]
-    
-    for t in times[1:]:
-        if t - current_group[-1] == timedelta(hours=1):
-            current_group.append(t)
-        else:
-            groups.append(current_group)
-            current_group = [t]
-    groups.append(current_group)
-    
-    # Print each group with today's date
-    today = datetime.now().date()
-    for group in groups:
-        start = group[0]
-        end = group[-1] + timedelta(hours=1)
-        print(f"{today.strftime('%Y-%m-%d')} {start.strftime('%H:%M')}-{end.strftime('%H:%M')}/1234567/{action}")
 
 def main() -> None:
     """Main function."""
     try:
+        # Log start of run
+        now = datetime.now()
+        tomorrow = now.date() + timedelta(days=1)
+        logger.info(f"\n=== Starting price analysis at {now.strftime('%Y-%m-%d %H:%M:%S')} ===")
+        logger.info(f"Analyzing prices for: {tomorrow.strftime('%Y-%m-%d')}\n")
+        
         prices = get_price_data()
         charge_hours, discharge_hours = find_charge_discharge_hours(prices)
         
@@ -202,15 +225,29 @@ def main() -> None:
                     current_group = [event]
             groups.append(current_group)
         
-        # Print each group (time range only)
+        # Log summary of decisions
+        logger.info("\nFinal schedule:")
+        for block in groups:
+            start = block[0][0]
+            end = block[-1][0] + timedelta(hours=1)
+            action = "Charging" if block[0][1] == '+' else "Discharging"
+            end_str = "23:59" if (block[-1][0].hour == 23 or end.hour == 0) else end.strftime('%H:%M')
+            logger.info(f"{action}: {start.strftime('%H:%M')}-{end_str}")
+        
+        # Log end of run
+        logger.info(f"\n=== Completed price analysis at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        
+        # Print schedule to console (unchanged)
         for group in groups:
             start = group[0][0]
             end = group[-1][0] + timedelta(hours=1)
             action = group[0][1]
-            print(f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}/1234567/{action}")
+            is_last_hour = group[-1][0].hour == 23 or end.hour == 0
+            end_str = "23:59" if is_last_hour else end.strftime('%H:%M')
+            print(f"{start.strftime('%H:%M')}-{end_str}/1234567/{action}")
         
     except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
+        logger.error(f"\n!!! Error occurred at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":

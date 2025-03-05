@@ -1,0 +1,35 @@
+
+=== Starting price analysis at 2025-03-05 23:34:46 ===
+Analyzing prices for: 2025-03-06
+
+Found charging blocks (chronological order):
+  00:00-01:00-02:00, avg price: 11.5 öre/kWh, discharge options: 12 hours
+  01:00-02:00-03:00, avg price: 10.8 öre/kWh, discharge options: 12 hours
+  02:00-03:00-04:00, avg price: 10.7 öre/kWh, discharge options: 12 hours
+  03:00-04:00-05:00, avg price: 11.4 öre/kWh, discharge options: 12 hours
+  04:00-05:00-06:00, avg price: 30.7 öre/kWh, discharge options: 8 hours
+  05:00-06:00-07:00, avg price: 54.2 öre/kWh, discharge options: 1 hours
+  08:00-09:00-10:00, avg price: 51.0 öre/kWh, discharge options: 1 hours
+  09:00-10:00-11:00, avg price: 28.4 öre/kWh, discharge options: 6 hours
+  10:00-11:00-12:00, avg price: 12.8 öre/kWh, discharge options: 8 hours
+  11:00-12:00-13:00, avg price: 10.4 öre/kWh, discharge options: 8 hours
+  12:00-13:00-14:00, avg price: 10.5 öre/kWh, discharge options: 8 hours
+  13:00-14:00-15:00, avg price: 14.1 öre/kWh, discharge options: 8 hours
+  14:00-15:00-16:00, avg price: 32.6 öre/kWh, discharge options: 4 hours
+
+Selected charge/discharge pairs (chronological order):
+Charging: 02:00-03:00-04:00, avg price: 10.7 öre/kWh
+Discharging: 06:00-10:00, avg price: 71.6 öre/kWh
+
+Charging: 11:00-12:00-13:00, avg price: 10.4 öre/kWh
+Discharging: 16:00-00:00, avg price: 45.9 öre/kWh
+
+
+Final schedule:
+Charging: 02:00-05:00
+Discharging: 06:00-10:00
+Charging: 11:00-14:00
+Discharging: 16:00-23:59
+
+=== Completed price analysis at 2025-03-05 23:34:47 ===
+
